@@ -1,10 +1,16 @@
 #!/usr/bin/env python
 
 import collections
-import time
 import bluetooth
 import sys
 import subprocess
+import RPi.GPIO as GPIO
+import json
+import gspread
+import time
+from time import strftime
+from oauth2client.client import SignedJwtAssertionCredentials
+import logging
 
 CONTINUOUS_REPORTING = "04"  # Easier as string with leading zero
 
@@ -33,15 +39,22 @@ BLUETOOTH_NAME = "Nintendo RVL-WBC-01"
 
 class EventProcessor:
     def __init__(self):
+    self.reset()    
+
+    def initBoard(self, board):
+    self.board = board
+
+    def reset(self):
         self._measured = False
         self.done = False
         self._events = []
 
     def mass(self, event):
-        if event.totalWeight > 30:
+        if event.totalWeight > 10:
             self._events.append(event.totalWeight)
             if not self._measured:
-                print "Starting measurement."
+        self.board.setLight(True)
+                logging.debug("Starting measurement.")
                 self._measured = True
         elif self._measured:
             self.done = True
@@ -73,6 +86,8 @@ class Wiiboard:
         self.receivesocket = None
         self.controlsocket = None
 
+    processor.initBoard(self)
+
         self.processor = processor
         self.calibration = []
         self.calibrationRequested = False
@@ -99,21 +114,21 @@ class Wiiboard:
     # Connect to the Wiiboard at bluetooth address <address>
     def connect(self, address):
         if address is None:
-            print "Non existant address"
+            logging.debug("Non existant address")
             return
         self.receivesocket.connect((address, 0x13))
         self.controlsocket.connect((address, 0x11))
         if self.receivesocket and self.controlsocket:
-            print "Connected to Wiiboard at address " + address
+            logging.debug("Connected to Wiiboard at address " + address)
             self.status = "Connected"
             self.address = address
             self.calibrate()
             useExt = ["00", COMMAND_REGISTER, "04", "A4", "00", "40", "00"]
             self.send(useExt)
             self.setReportingType()
-            print "Wiiboard connected"
+            logging.debug("Wiiboard connected")
         else:
-            print "Could not connect to Wiiboard at address " + address
+            logging.debug("Could not connect to Wiiboard at address " + address)
 
     def receive(self):
         #try:
@@ -134,10 +149,10 @@ class Wiiboard:
             elif intype == EXTENSION_8BYTES:
                 self.processor.mass(self.createBoardEvent(data[2:12]))
             else:
-                print "ACK to data write received"
+                logging.debug("ACK to data write received")
 
-        self.status = "Disconnected"
-        self.disconnect()
+        #self.status = "Disconnected"
+        #self.disconnect()
 
     def disconnect(self):
         if self.status == "Connected":
@@ -152,19 +167,19 @@ class Wiiboard:
             self.controlsocket.close()
         except:
             pass
-        print "WiiBoard disconnected"
+        logging.debug("WiiBoard disconnected")
 
     # Try to discover a Wiiboard
     def discover(self):
-        print "Press the red sync button on the board now"
+        logging.debug("Press the red sync button on the board now")
         address = None
         bluetoothdevices = bluetooth.discover_devices(duration=6, lookup_names=True)
         for bluetoothdevice in bluetoothdevices:
             if bluetoothdevice[1] == BLUETOOTH_NAME:
                 address = bluetoothdevice[0]
-                print "Found Wiiboard at address " + address
+                logging.debug("Found Wiiboard at address " + address)
         if address is None:
-            print "No Wiiboards discovered."
+            logging.debug("No Wiiboards discovered.")
         return address
 
     def createBoardEvent(self, bytes):
@@ -177,14 +192,14 @@ class Wiiboard:
         if state == BUTTON_DOWN_MASK:
             buttonPressed = True
             if not self.buttonDown:
-                print "Button pressed"
+                logging.debug("Button pressed")
                 self.buttonDown = True
 
         if not buttonPressed:
             if self.lastEvent.buttonPressed:
                 buttonReleased = True
                 self.buttonDown = False
-                print "Button released"
+                logging.debug("Button released")
 
         rawTR = (int(bytes[0].encode("hex"), 16) << 8) + int(bytes[1].encode("hex"), 16)
         rawBR = (int(bytes[2].encode("hex"), 16) << 8) + int(bytes[3].encode("hex"), 16)
@@ -270,36 +285,80 @@ class Wiiboard:
 
 
 def main():
-    processor = EventProcessor()
+    logging.basicConfig(filename='/home/pi/board.log',level=logging.DEBUG)
 
+    GPIO.setwarnings(False) 
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(24, GPIO.OUT)
+    GPIO.output(24, GPIO.LOW)
+    time.sleep(1)
+    GPIO.cleanup()  
+
+    processor = EventProcessor()
     board = Wiiboard(processor)
+
     if len(sys.argv) == 1:
-        print "Discovering board..."
+        logging.debug("Discovering board...")
         address = board.discover()
     else:
         address = sys.argv[1]
 
-    try:
+    #try:
+    #print "Disconnect..."
         # Disconnect already-connected devices.
         # This is basically Linux black magic just to get the thing to work.
-        subprocess.check_output(["bluez-test-input", "disconnect", address], stderr=subprocess.STDOUT)
-        subprocess.check_output(["bluez-test-input", "disconnect", address], stderr=subprocess.STDOUT)
-    except:
-        pass
+        #subprocess.check_output(["test-input", "disconnect", address], stderr=subprocess.STDOUT)
+        #subprocess.check_output(["test-input", "disconnect", address], stderr=subprocess.STDOUT)
+    #except:
+    #    pass
 
-    print "Trying to connect..."
+    logging.debug("Trying to connect...")
     board.connect(address)  # The wii board must be in sync mode at this time
-    board.wait(200)
-    # Flash the LED so we know we can step on.
-    board.setLight(False)
-    board.wait(500)
-    board.setLight(True)
-    board.receive()
 
-    print processor.weight
+    logging.debug('Connect to google spreadsheets...')
+    json_key = json.load(open('/home/pi/health-data-gapi.json'))
+    scope = ['https://spreadsheets.google.com/feeds']
+    credentials = SignedJwtAssertionCredentials(json_key['client_email'], json_key['private_key'], scope)
+
+    #board.wait(200)
+    # Flash the LED so we know we can step on.
+    #board.setLight(False)
+    #board.wait(500)
+    board.setLight(False)
+
+    while 1 == 1:
+    processor.reset()
+        board.receive()
+        logging.debug(processor.weight)
+    
+    logging.debug('Google Drive Authorization')
+    gc = gspread.authorize(credentials)
+
+    logging.debug('Open spreadsheet')
+    wks = gc.open_by_key('1WCZdXUC72PWgqr5uhRaqgiiDTNFqINulZoicD6SX6gA').sheet1
+
+    logging.debug('Add data to spreadsheet')
+
+    millis = 1 # int(round(time() * 1000))
+    formatted_time = strftime("%d %b %Y %H:%M")
+    
+    weight = processor.weight + 2
+    if weight >= 70:
+        name = 'Alex'
+    elif weight > 40 and weight < 70:
+        name = 'Olya'
+    else: 
+        name = 'Platon'
+    
+    rowToAdd = [formatted_time, name, str(weight), '', millis]
+    wks.append_row(rowToAdd)
+
+    board.setLight(False)
+    logging.debug('Ready for next job')
+
 
     # Disconnect the balance board after exiting.
-    subprocess.check_output(["bluez-test-device", "disconnect", address])
+    # subprocess.check_output(["bluez-test-device", "disconnect", address])
 
 if __name__ == "__main__":
     main()
